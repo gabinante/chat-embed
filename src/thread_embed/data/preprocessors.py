@@ -495,12 +495,254 @@ def preprocess_flyte_slack(raw_dir: Path) -> list[Conversation]:
 # ---------------------------------------------------------------------------
 
 
+def preprocess_ubuntu_irc_full(raw_dir: Path, max_docs: int | None = None) -> list[Conversation]:
+    """Process the full Ubuntu IRC dataset from common-pile/ubuntu_irc.
+
+    Each row = one day of one channel as a text blob.
+    Format: [HH:MM] <user> message text
+    We split into conversations using time gaps (>5 min gap = new conversation).
+    English-only channels to keep focused.
+    """
+    from datasets import load_from_disk
+
+    console.print("[bold]Processing Ubuntu IRC Full...[/]")
+    ds = load_from_disk(str(raw_dir))
+    split = ds["train"] if "train" in ds else ds
+
+    # Focus on English channels for v1
+    english_channels = {
+        "#ubuntu", "#kubuntu", "#xubuntu", "#ubuntu-offtopic",
+        "#ubuntu-devel", "#ubuntu-server", "#ubuntu-bugs",
+        "#ubuntu-discuss", "#ubuntu-uk", "#ubuntu-us",
+        "#juju", "#cloud-init", "#snappy",
+    }
+
+    conversations = []
+    doc_count = 0
+    TIME_GAP_MINUTES = 5  # gap between messages to split conversations
+
+    for idx, row in enumerate(track(split, description="Processing Ubuntu IRC")):
+        if max_docs and doc_count >= max_docs:
+            break
+
+        metadata = row.get("metadata", {})
+        channel = metadata.get("channel", "")
+
+        # Filter to English channels
+        if channel and channel not in english_channels:
+            continue
+
+        text = row.get("text", "")
+        if not text:
+            continue
+
+        doc_count += 1
+
+        # Parse individual messages from the day log
+        parsed_msgs = []
+        for line in text.split("\n"):
+            m = re.match(r"\[(\d{2}):(\d{2})\]\s+<([^>]+)>\s+(.*)", line)
+            if not m:
+                continue
+            hour, minute, author, content = m.groups()
+            content = clean_text(content.strip())
+            if not content or is_bot_message(content, author):
+                continue
+            time_mins = int(hour) * 60 + int(minute)
+            parsed_msgs.append({
+                "author": author.strip(),
+                "content": content,
+                "time_mins": time_mins,
+            })
+
+        if len(parsed_msgs) < 3:
+            continue
+
+        # Split into conversations by time gap
+        current_conv: list[dict] = [parsed_msgs[0]]
+        conv_idx = 0
+
+        for msg in parsed_msgs[1:]:
+            time_gap = msg["time_mins"] - current_conv[-1]["time_mins"]
+            # Handle midnight wraparound
+            if time_gap < 0:
+                time_gap += 24 * 60
+
+            if time_gap > TIME_GAP_MINUTES:
+                # Save current conversation
+                if len(current_conv) >= 3:
+                    messages = [
+                        Message(
+                            id=f"uirc_{idx}_{conv_idx}_{j}",
+                            author_id=m["author"],
+                            content=m["content"],
+                        )
+                        for j, m in enumerate(current_conv)
+                    ]
+                    messages = anonymize_speakers(messages)
+                    conv = Conversation(
+                        id=f"ubuntu_irc_{idx}_{conv_idx}",
+                        source="irc",
+                        messages=messages,
+                        metadata={"channel": channel},
+                    )
+                    if passes_quality_filter(conv):
+                        conversations.append(conv)
+
+                current_conv = [msg]
+                conv_idx += 1
+            else:
+                current_conv.append(msg)
+
+        # Don't forget the last conversation
+        if len(current_conv) >= 3:
+            messages = [
+                Message(
+                    id=f"uirc_{idx}_{conv_idx}_{j}",
+                    author_id=m["author"],
+                    content=m["content"],
+                )
+                for j, m in enumerate(current_conv)
+            ]
+            messages = anonymize_speakers(messages)
+            conv = Conversation(
+                id=f"ubuntu_irc_{idx}_{conv_idx}",
+                source="irc",
+                messages=messages,
+                metadata={"channel": channel},
+            )
+            if passes_quality_filter(conv):
+                conversations.append(conv)
+
+    console.print(f"  Processed {doc_count} channel-day documents")
+    return conversations
+
+
+def preprocess_discord_unveiled(raw_dir: Path) -> list[Conversation]:
+    """Process Discord Unveiled sampled data.
+
+    Data format: JSONL where each line = one channel with messages array.
+    Messages have: id, content, author_id, author_name, timestamp, channel_id,
+                   channel_name, type (0=normal, 19=reply), reply_to (optional).
+
+    We group messages into conversations using:
+    1. Reply chains (message_reference links)
+    2. Time proximity (>10 min gap = new conversation)
+    """
+    from datetime import datetime
+
+    console.print("[bold]Processing Discord Unveiled...[/]")
+    input_path = raw_dir / "messages_by_channel.jsonl"
+    if not input_path.exists():
+        console.print(f"  [red]Not found: {input_path}[/]")
+        return []
+
+    conversations = []
+    channel_count = 0
+
+    with open(input_path) as f:
+        for line in track(f, description="Processing Discord channels"):
+            data = json.loads(line)
+            msgs = data["messages"]
+            channel_name = data.get("channel_name", "unknown")
+            channel_count += 1
+
+            if len(msgs) < 3:
+                continue
+
+            # Build reply graph for threading
+            reply_graph: dict[str, str] = {}  # msg_id -> reply_to_id
+            msg_by_id: dict[str, dict] = {}
+            for msg in msgs:
+                msg_by_id[msg["id"]] = msg
+                if msg.get("reply_to"):
+                    reply_graph[msg["id"]] = msg["reply_to"]
+
+            # Find reply chain roots
+            def find_thread_root(mid: str) -> str:
+                visited = set()
+                while mid in reply_graph and mid not in visited:
+                    visited.add(mid)
+                    mid = reply_graph[mid]
+                return mid
+
+            # Group by reply threads first
+            thread_groups: dict[str, list[dict]] = defaultdict(list)
+            threaded_ids = set()
+            for msg in msgs:
+                if msg["id"] in reply_graph or msg["id"] in {v for v in reply_graph.values()}:
+                    root = find_thread_root(msg["id"])
+                    thread_groups[root].append(msg)
+                    threaded_ids.add(msg["id"])
+
+            # For non-threaded messages, group by time proximity
+            TIME_GAP_MINUTES = 10
+            unthreaded = [m for m in msgs if m["id"] not in threaded_ids]
+            if unthreaded:
+                current_group: list[dict] = [unthreaded[0]]
+                group_idx = 0
+
+                for msg in unthreaded[1:]:
+                    try:
+                        prev_ts = datetime.fromisoformat(current_group[-1]["timestamp"].replace("+00:00", ""))
+                        curr_ts = datetime.fromisoformat(msg["timestamp"].replace("+00:00", ""))
+                        gap = (curr_ts - prev_ts).total_seconds() / 60
+                    except (ValueError, TypeError):
+                        gap = TIME_GAP_MINUTES + 1
+
+                    if gap > TIME_GAP_MINUTES:
+                        if len(current_group) >= 3:
+                            thread_groups[f"time_{channel_count}_{group_idx}"] = current_group
+                        current_group = [msg]
+                        group_idx += 1
+                    else:
+                        current_group.append(msg)
+
+                if len(current_group) >= 3:
+                    thread_groups[f"time_{channel_count}_{group_idx}"] = current_group
+
+            # Convert thread groups to Conversations
+            for thread_id, thread_msgs in thread_groups.items():
+                # Sort by timestamp
+                thread_msgs.sort(key=lambda m: m.get("timestamp", ""))
+
+                messages = []
+                for m in thread_msgs:
+                    content = clean_text(m["content"])
+                    if not content or is_bot_message(content, m.get("author_name", "")):
+                        continue
+                    messages.append(
+                        Message(
+                            id=m["id"],
+                            author_id=m.get("author_name", m.get("author_id", "unknown")),
+                            content=content,
+                            reply_to=m.get("reply_to"),
+                        )
+                    )
+
+                if len(messages) >= 3:
+                    messages = anonymize_speakers(messages)
+                    conv = Conversation(
+                        id=f"discord_unveiled_{channel_count}_{thread_id}",
+                        source="discord",
+                        messages=messages,
+                        metadata={"channel": channel_name},
+                    )
+                    if passes_quality_filter(conv):
+                        conversations.append(conv)
+
+    console.print(f"  Processed {channel_count} channels")
+    return conversations
+
+
 PREPROCESSORS = {
     "discord_dialogues": preprocess_discord_dialogues,
     "irc_disentangle": preprocess_irc_disentangle,
     "slack_dev_chats_disentangled": preprocess_slack_disentangled,
     "flyte_slack": preprocess_flyte_slack,
     "flyte_slack_long": preprocess_flyte_slack,  # same format
+    "ubuntu_irc_full": preprocess_ubuntu_irc_full,
+    "discord_unveiled_sampled": preprocess_discord_unveiled,
 }
 
 

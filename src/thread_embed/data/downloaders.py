@@ -35,10 +35,15 @@ DATASETS = {
     },
     # P1 — good value, moderate effort
     "discord_unveiled": {
-        "hf_path": "SaisExperiments/Discord-Unveiled-Compressed",
+        "hf_path": "fvdfs41/Discord-Unveiled",
         "priority": "P1",
-        "description": "2B+ Discord messages (will sample ~1%)",
+        "description": "2B+ Discord messages across 3,167 servers (JSON files per server)",
         "sample_fraction": 0.01,
+    },
+    "ubuntu_irc_full": {
+        "hf_path": "common-pile/ubuntu_irc",
+        "priority": "P0",
+        "description": "329k channel-day docs from Ubuntu IRC (2004-2024), 6.3GB, multi-party with channel info",
     },
     "slack_dev_chats": {
         "source": "github",
@@ -63,12 +68,7 @@ DATASETS = {
         "priority": "P1",
         "description": "24.5k long-form Slack responses from Flyte community",
     },
-    "clojurians_log": {
-        "source": "github",
-        "url": "https://github.com/GaiwanTeam/clojurians-log-v2",
-        "priority": "P1",
-        "description": "Clojurians Slack archive — ~2M messages across hundreds of channels",
-    },
+    # clojurians_log: repo is the viewer app, not raw data — skipped
     # P2 — supplementary
     "topical_chat": {
         "hf_path": "Conversational-Reasoning/Topical-Chat",
