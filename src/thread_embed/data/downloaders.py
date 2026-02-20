@@ -28,9 +28,10 @@ DATASETS = {
         "description": "7.3M exchanges, 16M turns of Discord conversations in ChatML format",
     },
     "irc_disentangle": {
-        "hf_path": "jkkummerfeld/irc-disentangle",
+        "source": "github",
+        "url": "https://github.com/jkkummerfeld/irc-disentanglement",
         "priority": "P0",
-        "description": "~70k annotated IRC messages with conversation disentanglement labels",
+        "description": "~70k annotated IRC messages with conversation disentanglement labels (Ubuntu IRC)",
     },
     # P1 — good value, moderate effort
     "discord_unveiled": {
@@ -102,10 +103,10 @@ def download_hf_dataset(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        ds = load_dataset(hf_path, split=split, trust_remote_code=True)
+        ds = load_dataset(hf_path, split=split)
     except Exception:
         # Some datasets need specific config names — try without split
-        ds = load_dataset(hf_path, trust_remote_code=True)
+        ds = load_dataset(hf_path)
 
     # If it's a DatasetDict, save all splits
     from datasets import DatasetDict

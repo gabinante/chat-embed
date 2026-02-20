@@ -10,6 +10,8 @@ import json
 import logging
 import re
 import uuid
+import xml.etree.ElementTree as ET
+from collections import defaultdict
 from pathlib import Path
 
 from rich.console import Console
@@ -181,61 +183,117 @@ def preprocess_discord_dialogues(raw_dir: Path) -> list[Conversation]:
 
 
 def preprocess_irc_disentangle(raw_dir: Path) -> list[Conversation]:
-    """Process IRC Disentanglement dataset.
+    """Process IRC Disentanglement dataset from GitHub repo.
 
-    Uses disentanglement annotations to group messages into conversations.
+    Data format:
+    - data/{split}/{date}.{split_id}.ascii.txt — IRC messages: [HH:MM] <user> text
+    - data/{split}/{date}.{split_id}.annotation.txt — parent_id msg_id annotator
+      The first column is the parent message ID that this message responds to.
+      Messages that start a new conversation have parent_id == msg_id.
+
+    We use the annotation graph to group messages into conversation trees.
     """
-    from datasets import load_from_disk
-
     console.print("[bold]Processing IRC Disentanglement...[/]")
-    ds = load_from_disk(str(raw_dir))
-
-    # The dataset has annotations mapping each message to a conversation cluster
+    data_dir = raw_dir / "data"
     conversations = []
-    split = ds["train"] if "train" in ds else ds
+    file_count = 0
 
-    # Group messages by their conversation annotation
-    conv_groups: dict[str, list[dict]] = {}
-
-    for row in track(split, description="Grouping messages"):
-        # Dataset structure varies — adapt to actual schema
-        msg_id = str(row.get("id", row.get("message_id", uuid.uuid4().hex[:8])))
-        content = row.get("text", row.get("message", ""))
-        author = row.get("author", row.get("sender", row.get("user", "unknown")))
-        annotation = str(row.get("annotation", row.get("conversation_id", row.get("cluster", msg_id))))
-
-        if not content or is_bot_message(str(content), str(author)):
+    # Process all splits (train, dev, test)
+    for split_dir in sorted(data_dir.iterdir()):
+        if not split_dir.is_dir():
             continue
 
-        if annotation not in conv_groups:
-            conv_groups[annotation] = []
+        # Find all annotation files in this split
+        annotation_files = sorted(split_dir.glob("*.annotation.txt"))
 
-        conv_groups[annotation].append({
-            "id": msg_id,
-            "author": str(author),
-            "content": clean_text(str(content)),
-        })
+        for ann_file in track(annotation_files, description=f"Processing IRC {split_dir.name}"):
+            # Derive the corresponding ascii file
+            ascii_file = Path(str(ann_file).replace(".annotation.txt", ".ascii.txt"))
+            if not ascii_file.exists():
+                continue
 
-    # Convert groups to Conversation objects
-    for conv_id, msgs in track(conv_groups.items(), description="Building conversations"):
-        messages = [
-            Message(
-                id=m["id"],
-                author_id=m["author"],
-                content=m["content"],
-            )
-            for m in msgs
-        ]
-        messages = anonymize_speakers(messages)
-        conv = Conversation(
-            id=f"irc_{conv_id}",
-            source="irc",
-            messages=messages,
-            metadata={"channel": "ubuntu"},  # primary channel in this dataset
-        )
-        if passes_quality_filter(conv):
-            conversations.append(conv)
+            file_count += 1
 
+            # Parse messages from ascii file
+            # Lines: [HH:MM] <username> message text
+            # Or: === username [~info] has joined/left
+            msg_lines: dict[int, dict] = {}
+            line_num = 1000  # IRC disentangle uses 1000-based line numbers
+
+            with open(ascii_file, encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    line = line.rstrip("\n")
+                    # Parse IRC message: [HH:MM] <user> content
+                    m = re.match(r"\[(\d{2}:\d{2})\]\s+<([^>]+)>\s+(.*)", line)
+                    if m:
+                        timestamp, author, content = m.groups()
+                        content = clean_text(content)
+                        if content and not is_bot_message(content, author):
+                            msg_lines[line_num] = {
+                                "id": str(line_num),
+                                "author": author.strip(),
+                                "content": content,
+                                "timestamp": timestamp,
+                            }
+                    line_num += 1
+
+            # Parse annotation file to build conversation graph
+            # Format: parent_id msg_id annotator
+            # parent_id == msg_id means this starts a new conversation
+            conv_roots: dict[int, list[int]] = {}  # root_id -> [msg_ids in order]
+            parent_map: dict[int, int] = {}
+
+            with open(ann_file) as f:
+                for line in f:
+                    parts = line.strip().split()
+                    if len(parts) < 2:
+                        continue
+                    parent_id = int(parts[0])
+                    msg_id = int(parts[1])
+                    parent_map[msg_id] = parent_id
+
+            # Trace each message to its conversation root
+            def find_root(mid: int) -> int:
+                visited = set()
+                while parent_map.get(mid, mid) != mid:
+                    if mid in visited:
+                        break
+                    visited.add(mid)
+                    mid = parent_map[mid]
+                return mid
+
+            root_groups: dict[int, list[int]] = defaultdict(list)
+            for mid in sorted(parent_map.keys()):
+                root = find_root(mid)
+                root_groups[root].append(mid)
+
+            # Convert to Conversation objects
+            date_prefix = ann_file.stem.split(".")[0]
+            for root_id, msg_ids in root_groups.items():
+                messages = []
+                for mid in msg_ids:
+                    if mid in msg_lines:
+                        ml = msg_lines[mid]
+                        messages.append(
+                            Message(
+                                id=ml["id"],
+                                author_id=ml["author"],
+                                content=ml["content"],
+                            )
+                        )
+
+                if len(messages) >= 2:
+                    messages = anonymize_speakers(messages)
+                    conv = Conversation(
+                        id=f"irc_{date_prefix}_{root_id}",
+                        source="irc",
+                        messages=messages,
+                        metadata={"channel": "ubuntu", "date": date_prefix},
+                    )
+                    if passes_quality_filter(conv):
+                        conversations.append(conv)
+
+    console.print(f"  Processed {file_count} IRC log files")
     return conversations
 
 
@@ -328,6 +386,110 @@ def preprocess_slack_export(raw_dir: Path, source_name: str = "slack") -> list[C
     return conversations
 
 
+def preprocess_slack_disentangled(raw_dir: Path) -> list[Conversation]:
+    """Process Software-related Slack Chats with disentangled conversations.
+
+    Data format: XML files with <message conversation_id="N"> elements.
+    Structure: data/{community}/{year}/merged-{channel}.xml
+    """
+    console.print("[bold]Processing Slack Disentangled Chats...[/]")
+    data_dir = raw_dir / "data"
+    conversations = []
+
+    xml_files = sorted(data_dir.rglob("*.xml"))
+    console.print(f"  Found {len(xml_files)} XML files")
+
+    for xml_file in track(xml_files, description="Processing Slack XML"):
+        community = xml_file.parts[-3]  # e.g. "pythondev"
+
+        try:
+            tree = ET.parse(xml_file)
+            root = tree.getroot()
+        except ET.ParseError as e:
+            console.print(f"  [yellow]Parse error in {xml_file}: {e}[/]")
+            continue
+
+        # Group messages by conversation_id
+        conv_groups: dict[str, list[dict]] = defaultdict(list)
+        channel = root.findtext("channel_name", "unknown")
+
+        for msg_elem in root.findall("message"):
+            conv_id = msg_elem.get("conversation_id", "0")
+            user = msg_elem.findtext("user", "unknown")
+            text = msg_elem.findtext("text", "")
+            ts = msg_elem.findtext("ts", "")
+
+            if not text or is_bot_message(text, user):
+                continue
+
+            conv_groups[conv_id].append({
+                "user": user,
+                "text": clean_text(text),
+                "ts": ts,
+            })
+
+        # Convert groups to Conversations
+        for conv_id, msgs in conv_groups.items():
+            messages = [
+                Message(
+                    id=f"slack_{community}_{conv_id}_{i}",
+                    author_id=m["user"],
+                    content=m["text"],
+                )
+                for i, m in enumerate(msgs)
+            ]
+            messages = anonymize_speakers(messages)
+
+            conv = Conversation(
+                id=f"slack_disentangled_{community}_{conv_id}",
+                source="slack",
+                messages=messages,
+                metadata={"channel": channel, "community": community},
+            )
+            if passes_quality_filter(conv):
+                conversations.append(conv)
+
+    return conversations
+
+
+def preprocess_flyte_slack(raw_dir: Path) -> list[Conversation]:
+    """Process Flyte Slack Q&A pairs (input/output format from HuggingFace).
+
+    Each row has an 'input' and 'output' field representing a conversation turn pair.
+    We group consecutive pairs into conversations.
+    """
+    from datasets import load_from_disk
+
+    console.print("[bold]Processing Flyte Slack Data...[/]")
+    ds = load_from_disk(str(raw_dir))
+    split = ds["train"] if "train" in ds else ds
+
+    conversations = []
+    for idx, row in enumerate(track(split, description="Processing Flyte Slack")):
+        input_text = clean_text(str(row.get("input", "")))
+        output_text = clean_text(str(row.get("output", "")))
+
+        if not input_text or not output_text:
+            continue
+
+        messages = [
+            Message(id=f"flyte_{idx}_0", author_id="speaker_1", content=input_text),
+            Message(id=f"flyte_{idx}_1", author_id="speaker_2", content=output_text),
+        ]
+
+        conv = Conversation(
+            id=f"flyte_slack_{idx}",
+            source="slack",
+            messages=messages,
+            metadata={"community": "flyte"},
+        )
+        # Relax quality filter for 2-message Q&A pairs
+        if len(input_text.split()) >= 3 and len(output_text.split()) >= 3:
+            conversations.append(conv)
+
+    return conversations
+
+
 # ---------------------------------------------------------------------------
 # Main preprocessing dispatch
 # ---------------------------------------------------------------------------
@@ -336,6 +498,9 @@ def preprocess_slack_export(raw_dir: Path, source_name: str = "slack") -> list[C
 PREPROCESSORS = {
     "discord_dialogues": preprocess_discord_dialogues,
     "irc_disentangle": preprocess_irc_disentangle,
+    "slack_dev_chats_disentangled": preprocess_slack_disentangled,
+    "flyte_slack": preprocess_flyte_slack,
+    "flyte_slack_long": preprocess_flyte_slack,  # same format
 }
 
 
