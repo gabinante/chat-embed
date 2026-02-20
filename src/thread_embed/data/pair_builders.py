@@ -66,6 +66,7 @@ def build_thread_pairs(
     pairs_per_conversation: int = 3,
     min_window: int = 3,
     max_window: int = 8,
+    max_pairs: int | None = None,
 ) -> list[TrainingPair]:
     """Generate thread-based positive pairs.
 
@@ -106,6 +107,8 @@ def build_thread_pairs(
                     },
                 )
             )
+            if max_pairs and len(pairs) >= max_pairs:
+                return pairs
 
     return pairs
 
@@ -126,6 +129,7 @@ def build_query_response_pairs(
     conversations: list[Conversation],
     min_response_messages: int = 1,
     max_response_messages: int = 5,
+    max_pairs: int | None = None,
 ) -> list[TrainingPair]:
     """Generate query-response positive pairs.
 
@@ -160,6 +164,8 @@ def build_query_response_pairs(
                     },
                 )
             )
+            if max_pairs and len(pairs) >= max_pairs:
+                return pairs
 
     return pairs
 
@@ -172,6 +178,7 @@ def build_query_response_pairs(
 def build_temporal_pairs(
     conversations: list[Conversation],
     window_size: int = 5,
+    max_pairs: int | None = None,
 ) -> list[TrainingPair]:
     """Generate temporal adjacency positive pairs.
 
@@ -205,6 +212,8 @@ def build_temporal_pairs(
                     },
                 )
             )
+            if max_pairs and len(pairs) >= max_pairs:
+                return pairs
 
     return pairs
 
@@ -230,12 +239,29 @@ def save_pairs(pairs: list[TrainingPair], strategy_name: str) -> Path:
     return output_path
 
 
-def load_conversations(processed_dir: Path) -> list[Conversation]:
-    """Load normalized conversations from a processed directory."""
+def load_conversations(
+    processed_dir: Path,
+    max_conversations: int | None = None,
+    seed: int = 42,
+) -> list[Conversation]:
+    """Load normalized conversations from a processed directory.
+
+    If max_conversations is set, reservoir sample to that limit.
+    """
     convs = []
     for jsonl_file in sorted(processed_dir.rglob("conversations.jsonl")):
         with open(jsonl_file) as f:
             for line in f:
                 convs.append(Conversation.model_validate_json(line))
-    console.print(f"  Loaded {len(convs):,} conversations from {processed_dir}")
+
+    total = len(convs)
+    if max_conversations and total > max_conversations:
+        rng = random.Random(seed)
+        convs = rng.sample(convs, max_conversations)
+        console.print(
+            f"  Loaded {max_conversations:,} conversations "
+            f"(sampled from {total:,}) from {processed_dir}"
+        )
+    else:
+        console.print(f"  Loaded {len(convs):,} conversations from {processed_dir}")
     return convs

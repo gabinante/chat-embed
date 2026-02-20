@@ -37,9 +37,11 @@ PROCESSED_DIR = Path("data/processed")
     help="Which pair generation strategy to run",
 )
 @click.option("--source", type=str, default=None, help="Only use a specific source dataset")
-def main(strategy: str, source: str | None):
+@click.option("--max-per-source", type=int, default=50_000, help="Max conversations to load per source")
+@click.option("--max-pairs", type=int, default=500_000, help="Max pairs per strategy")
+def main(strategy: str, source: str | None, max_per_source: int, max_pairs: int):
     """Build training pairs from preprocessed conversations."""
-    # Load all processed conversations
+    # Load all processed conversations (sampled per source)
     if source:
         source_dirs = [PROCESSED_DIR / source]
     else:
@@ -47,20 +49,20 @@ def main(strategy: str, source: str | None):
 
     all_conversations = []
     for d in source_dirs:
-        all_conversations.extend(load_conversations(d))
+        all_conversations.extend(load_conversations(d, max_conversations=max_per_source))
 
     console.print(f"[bold]Total conversations: {len(all_conversations):,}[/]")
 
     if strategy in ("thread_based", "all"):
-        pairs = build_thread_pairs(all_conversations)
+        pairs = build_thread_pairs(all_conversations, max_pairs=max_pairs)
         save_pairs(pairs, "thread_based")
 
     if strategy in ("query_response", "all"):
-        pairs = build_query_response_pairs(all_conversations)
+        pairs = build_query_response_pairs(all_conversations, max_pairs=max_pairs)
         save_pairs(pairs, "query_response")
 
     if strategy in ("temporal", "all"):
-        pairs = build_temporal_pairs(all_conversations)
+        pairs = build_temporal_pairs(all_conversations, max_pairs=max_pairs)
         save_pairs(pairs, "temporal")
 
 
