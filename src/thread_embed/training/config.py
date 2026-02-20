@@ -14,11 +14,11 @@ class TrainingConfig:
 
     # Training
     epochs: int = 3
-    batch_size: int = 256
+    batch_size: int = 64
     learning_rate: float = 2e-5
     warmup_ratio: float = 0.1
     weight_decay: float = 0.01
-    fp16: bool = True
+    fp16: bool = True  # auto-disabled on MPS, falls back to bf16
 
     # Loss
     loss: str = "MultipleNegativesRankingLoss"
