@@ -71,14 +71,16 @@ def train(config: TrainingConfig | None = None):
         loss = base_loss
 
     # 4. Training arguments (adapt for available hardware)
-    # Calculate warmup steps from ratio
-    total_steps = (len(train_dataset) // config.batch_size) * config.epochs
+    # Calculate warmup steps from ratio (based on optimizer steps, not data steps)
+    effective_batch = config.batch_size * config.gradient_accumulation_steps
+    total_steps = (len(train_dataset) // effective_batch) * config.epochs
     warmup_steps = int(total_steps * config.warmup_ratio)
 
     args = SentenceTransformerTrainingArguments(
         output_dir=config.output_dir,
         num_train_epochs=config.epochs,
         per_device_train_batch_size=config.batch_size,
+        gradient_accumulation_steps=config.gradient_accumulation_steps,
         learning_rate=config.learning_rate,
         warmup_steps=warmup_steps,
         weight_decay=config.weight_decay,
@@ -86,7 +88,7 @@ def train(config: TrainingConfig | None = None):
         bf16=use_bf16,
         eval_strategy="no",
         save_steps=config.save_steps,
-        logging_steps=100,
+        logging_steps=50,
         save_total_limit=3,
         dataloader_num_workers=0,  # MPS doesn't support multiprocess data loading
     )

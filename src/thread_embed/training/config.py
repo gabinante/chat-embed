@@ -14,7 +14,8 @@ class TrainingConfig:
 
     # Training
     epochs: int = 3
-    batch_size: int = 64
+    batch_size: int = 16  # per-device batch size (small for MPS memory)
+    gradient_accumulation_steps: int = 4  # effective batch = 16 * 4 = 64
     learning_rate: float = 2e-5
     warmup_ratio: float = 0.1
     weight_decay: float = 0.01
