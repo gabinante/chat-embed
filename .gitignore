@@ -2,7 +2,9 @@
 data/raw/
 data/processed/
 data/pairs/
-data/eval/
+data/eval/thread_retrieval.jsonl
+data/eval/response_retrieval.jsonl
+data/eval/cross_platform/
 models/
 
 # Python
