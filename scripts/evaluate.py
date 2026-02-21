@@ -4,15 +4,19 @@
 Usage:
     python scripts/evaluate.py --model models/thread-embed-v1
     python scripts/evaluate.py --model BAAI/bge-base-en-v1.5  # baseline
+    python scripts/evaluate.py --model openai:text-embedding-3-small  # OpenAI API
     python scripts/evaluate.py --compare models/thread-embed-v1 BAAI/bge-base-en-v1.5
 """
 
 import json
+import os
 import sys
+import time
 from pathlib import Path
 
 import click
 import numpy as np
+from dotenv import load_dotenv
 from rich.console import Console
 from rich.table import Table
 
@@ -20,9 +24,76 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from thread_embed.eval.metrics import mrr_at_k, ndcg_at_k, recall_at_k
 
+load_dotenv()
+
 console = Console()
 
 EVAL_DIR = Path("data/eval")
+
+OPENAI_PREFIX = "openai:"
+
+
+def _truncate_text(text: str, max_chars: int = 20000) -> str:
+    """Truncate text to stay within API token limits (~3 chars/token for chat data)."""
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars]
+
+
+class OpenAIEmbeddingModel:
+    """Wrapper around OpenAI embeddings API to match SentenceTransformer interface."""
+
+    def __init__(self, model_name: str):
+        from openai import OpenAI
+        self.client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+        self.model_name = model_name
+        self._request_count = 0
+
+    def encode(self, texts: list[str], batch_size: int = 64, normalize_embeddings: bool = True) -> np.ndarray:
+        all_embeddings = []
+        for i in range(0, len(texts), batch_size):
+            batch = [_truncate_text(t) for t in texts[i:i + batch_size]]
+            self._request_count += 1
+            if self._request_count % 50 == 0:
+                time.sleep(0.5)
+            response = self.client.embeddings.create(input=batch, model=self.model_name)
+            embeddings = [item.embedding for item in response.data]
+            all_embeddings.extend(embeddings)
+        result = np.array(all_embeddings, dtype=np.float32)
+        if normalize_embeddings:
+            norms = np.linalg.norm(result, axis=1, keepdims=True)
+            result = result / np.maximum(norms, 1e-12)
+        return result
+
+
+VOYAGE_PREFIX = "voyage:"
+
+
+class VoyageEmbeddingModel:
+    """Wrapper around Voyage AI embeddings API."""
+
+    def __init__(self, model_name: str):
+        import voyageai
+        self.client = voyageai.Client(api_key=os.environ["VOYAGE_API_KEY"])
+        self.model_name = model_name
+        self._request_count = 0
+
+    def encode(self, texts: list[str], batch_size: int = 64, normalize_embeddings: bool = True) -> np.ndarray:
+        all_embeddings = []
+        # Voyage batch limit is 128 texts, use smaller batches to be safe
+        chunk_size = min(batch_size, 64)
+        for i in range(0, len(texts), chunk_size):
+            batch = [_truncate_text(t) for t in texts[i:i + chunk_size]]
+            self._request_count += 1
+            if self._request_count % 50 == 0:
+                time.sleep(0.5)
+            result = self.client.embed(batch, model=self.model_name)
+            all_embeddings.extend(result.embeddings)
+        result = np.array(all_embeddings, dtype=np.float32)
+        if normalize_embeddings:
+            norms = np.linalg.norm(result, axis=1, keepdims=True)
+            result = result / np.maximum(norms, 1e-12)
+        return result
 
 
 def load_eval_task(filepath: Path) -> list[dict]:
@@ -150,7 +221,14 @@ def main(model: tuple, compare: tuple, eval_data: str, batch_size: int, output: 
 
     for model_id in model_ids:
         console.print(f"\n[bold]Loading model: {model_id}[/]")
-        st_model = SentenceTransformer(model_id)
+        if model_id.startswith(OPENAI_PREFIX):
+            openai_model = model_id[len(OPENAI_PREFIX):]
+            st_model = OpenAIEmbeddingModel(openai_model)
+        elif model_id.startswith(VOYAGE_PREFIX):
+            voyage_model = model_id[len(VOYAGE_PREFIX):]
+            st_model = VoyageEmbeddingModel(voyage_model)
+        else:
+            st_model = SentenceTransformer(model_id)
 
         for task_name, examples in tasks.items():
             console.print(f"  Evaluating on {task_name}...")

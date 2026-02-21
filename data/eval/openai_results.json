@@ -1,0 +1,62 @@
+[
+  {
+    "task": "Thread Retrieval",
+    "model": "openai:text-embedding-3-small",
+    "MRR@10": 0.4633,
+    "R@1": 0.388,
+    "R@5": 0.56,
+    "R@10": 0.648,
+    "NDCG@10": 0.507,
+    "n_queries": 500
+  },
+  {
+    "task": "Response Retrieval",
+    "model": "openai:text-embedding-3-small",
+    "MRR@10": 0.7258,
+    "R@1": 0.644,
+    "R@5": 0.834,
+    "R@10": 0.89,
+    "NDCG@10": 0.7655,
+    "n_queries": 500
+  },
+  {
+    "task": "XPlatform/discord_unveiled_sampled",
+    "model": "openai:text-embedding-3-small",
+    "MRR@10": 0.4461,
+    "R@1": 0.3636,
+    "R@5": 0.6364,
+    "R@10": 0.697,
+    "NDCG@10": 0.5053,
+    "n_queries": 33
+  },
+  {
+    "task": "XPlatform/irc_disentangle",
+    "model": "openai:text-embedding-3-small",
+    "MRR@10": 0.3201,
+    "R@1": 0.2254,
+    "R@5": 0.4648,
+    "R@10": 0.5634,
+    "NDCG@10": 0.3774,
+    "n_queries": 71
+  },
+  {
+    "task": "XPlatform/slack_dev_chats_disentangled",
+    "model": "openai:text-embedding-3-small",
+    "MRR@10": 0.443,
+    "R@1": 0.3803,
+    "R@5": 0.5493,
+    "R@10": 0.6338,
+    "NDCG@10": 0.4876,
+    "n_queries": 71
+  },
+  {
+    "task": "XPlatform/ubuntu_irc_full",
+    "model": "openai:text-embedding-3-small",
+    "MRR@10": 0.4069,
+    "R@1": 0.338,
+    "R@5": 0.507,
+    "R@10": 0.6056,
+    "NDCG@10": 0.4532,
+    "n_queries": 71
+  }
+]
